@@ -1,0 +1,30 @@
+# Virtual environment / Python cache
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Temporary capture files
+.tmp/
+.tmp_*/
+.tmp_airbnb_capture/
+
+# Local Chrome profile / auth state
+chrome_airbnb_profile/
+chrome_airbnb_profile_*/
+airbnb_cookies.json
+
+# Local inputs / outputs
+conversations.txt
+screenshots/
+airbnb_error_*.jpg
+airbnb_diagnose.jpg
+airbnb_chat_*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
