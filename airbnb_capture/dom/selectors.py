@@ -4,13 +4,16 @@ from selenium import webdriver
 
 from ..config import KNOWN_CHAT_TESTIDS, KNOWN_DETAILS_TESTIDS, log
 from ..models import Selectors
-from .js import all_testids, scrollable_divs, viewport_width
+from .js import all_testids, mark_capture_region, scrollable_divs, viewport_width
 
 def detect_selectors(driver: webdriver.Chrome) -> Selectors:
     log.info("Auto-detecting selectors...")
     tids  = all_testids(driver)
     divs  = scrollable_divs(driver)
     vw    = viewport_width(driver)
+    log.info("  found %d data-testid value(s), %d scrollable div(s)", len(tids), len(divs))
+    if tids:
+        log.info("  data-testid values: %s", ", ".join(sorted(tids)))
 
     chat_sel    = None
     details_sel = None
@@ -39,6 +42,61 @@ def detect_selectors(driver: webdriver.Chrome) -> Selectors:
                 log.info("  details → %s (heuristic)", details_sel)
             if chat_sel and details_sel:
                 break
+
+    if not chat_sel:
+        ranked = sorted(divs, key=lambda d: d["scrollH"], reverse=True)
+        for idx, d in enumerate(ranked):
+            cx = d["left"] + d["width"] / 2
+            if cx < vw * 0.85:
+                chat_sel = f"[data-airbnb-capture-scrollable='{idx}']"
+                log.info(
+                    "  chat    → largest scrollable div fallback %s "
+                    "(scrollH=%s clientH=%s w=%s left=%s)",
+                    chat_sel,
+                    d["scrollH"],
+                    d["clientH"],
+                    d["width"],
+                    d["left"],
+                )
+                break
+
+    if chat_sel and chat_sel.startswith("[data-airbnb-capture-scrollable="):
+        # Mark scrollable candidates after choosing the rank so Selenium can
+        # locate a support-chat container even when Airbnb omits data-testid.
+        driver.execute_script("""
+            var ranked = [];
+            var candidates = Array.from(document.querySelectorAll('div'));
+            candidates.push(document.scrollingElement || document.documentElement);
+            candidates.forEach(function(el) {
+                if (el.scrollHeight <= el.clientHeight + 100) return;
+                if (el.clientHeight < 200) return;
+                var r = el.getBoundingClientRect();
+                var isPage = el === document.body || el === document.documentElement;
+                if (!isPage && r.width < 200) return;
+                ranked.push({el: el, scrollH: el.scrollHeight, left: r.left, width: r.width});
+            });
+            ranked.sort(function(a, b) { return b.scrollH - a.scrollH; });
+            ranked.forEach(function(item, idx) {
+                item.el.setAttribute('data-airbnb-capture-scrollable', String(idx));
+            });
+        """)
+
+    if not chat_sel:
+        region = mark_capture_region(driver)
+        if region:
+            chat_sel = region["selector"]
+            log.info(
+                "  chat    → visible content fallback %s "
+                "(tag=%s testid=%s text=%s w=%s h=%s left=%s top=%s)",
+                chat_sel,
+                region.get("tag", ""),
+                region.get("testid", ""),
+                region.get("textLen", 0),
+                region.get("width", 0),
+                region.get("height", 0),
+                region.get("left", 0),
+                region.get("top", 0),
+            )
 
     sel = Selectors()
     if chat_sel:

@@ -12,6 +12,7 @@ from ..browser.factory import _build_headless_driver, build_driver
 from ..capture.conversation import capture_conversation
 from ..config import log
 from ..models import BulkSummary, CaptureResult, Selectors
+from ..output.pdf import PdfOptions
 from ..paths import resolve_path
 from ..tmp import purge_tmp
 from .sequential import run_captures
@@ -24,6 +25,10 @@ def _run_visible_fallback(
     domain: str,
     page_load_extra_s: float,
     capture_details: bool,
+    include_banner: bool,
+    export_format: str,
+    pdf_dir: str,
+    pdf_options: PdfOptions | None,
     reason: str,
 ) -> BulkSummary:
     log.warning("%s; falling back to visible sequential capture.", reason)
@@ -37,6 +42,10 @@ def _run_visible_fallback(
             domain=domain,
             page_load_extra_s=page_load_extra_s,
             capture_details=capture_details,
+            include_banner=include_banner,
+            export_format=export_format,
+            pdf_dir=pdf_dir,
+            pdf_options=pdf_options,
         )
     finally:
         try:
@@ -48,9 +57,13 @@ def _run_visible_fallback(
 def _worker(
     conversation_id: str,
     output_path: Path,
+    pdf_path: Path,
     domain: str,
     page_load_extra_s: float,
     capture_details: bool,
+    include_banner: bool,
+    export_format: str,
+    pdf_options: PdfOptions | None,
     worker_index: int,
     cookies: list[dict],
 ) -> CaptureResult:
@@ -79,16 +92,21 @@ def _worker(
             driver=driver,
             conversation_id=conversation_id,
             output_path=output_path,
+            pdf_path=pdf_path,
             selectors=Selectors(),
             domain=domain,
             page_load_extra_s=page_load_extra_s,
             capture_details=capture_details,
+            include_banner=include_banner,
+            export_format=export_format,
+            pdf_options=pdf_options,
         )
-        return CaptureResult(conversation_id=conversation_id, output_path=output_path)
+        primary_path = pdf_path if export_format == "pdf" else output_path
+        return CaptureResult(conversation_id=conversation_id, output_path=primary_path)
     except Exception as exc:
         return CaptureResult(
             conversation_id=conversation_id,
-            error=str(exc),
+            error=f"{type(exc).__name__}: {exc}",
             tb=traceback.format_exc(),
         )
     finally:
@@ -107,14 +125,13 @@ def run_bulk_capture(
     page_load_extra_s: float,
     capture_details: bool,
     max_workers: int,
+    include_banner: bool = False,
+    export_format: str = "jpg",
+    pdf_dir: str = "pdfs",
+    pdf_options: PdfOptions | None = None,
 ) -> BulkSummary:
     """
     Capture conversations in parallel using headless Chrome workers.
-
-    Worker count is capped at 2 on Windows because each headless Chrome
-    renderer needs ~500 MB RAM and its own GPU process.  Starting more than
-    2 simultaneously causes renderer startup failures regardless of staggering.
-    2 workers still gives a meaningful speedup for 3+ conversations.
 
     Flow:
       1. Extract session cookies with a single visible Chrome (3 s).
@@ -127,7 +144,11 @@ def run_bulk_capture(
     is_multi = len(conversation_ids) > 1
 
     jobs = [
-        (cid, resolve_path(cid, out_flag, out_dir, is_multi))
+        (
+            cid,
+            resolve_path(cid, out_flag, out_dir, is_multi, ".jpg"),
+            resolve_path(cid, out_flag, pdf_dir, is_multi, ".pdf"),
+        )
         for cid in conversation_ids
     ]
 
@@ -142,6 +163,10 @@ def run_bulk_capture(
             domain=domain,
             page_load_extra_s=page_load_extra_s,
             capture_details=capture_details,
+            include_banner=include_banner,
+            export_format=export_format,
+            pdf_dir=pdf_dir,
+            pdf_options=pdf_options,
             reason=f"Cookie extraction failed: {exc}",
         )
 
@@ -153,6 +178,10 @@ def run_bulk_capture(
             domain=domain,
             page_load_extra_s=page_load_extra_s,
             capture_details=capture_details,
+            include_banner=include_banner,
+            export_format=export_format,
+            pdf_dir=pdf_dir,
+            pdf_options=pdf_options,
             reason="No cookies were found in the saved profile",
         )
 
@@ -160,13 +189,16 @@ def run_bulk_capture(
     log.info("Launching %d parallel worker(s) for %d conversation(s)...", n_workers, len(jobs))
 
     futures: dict = {}
+    results_by_id: dict[str, CaptureResult] = {}
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        for idx, (cid, output_path) in enumerate(jobs):
-            log.info("  Queuing %s -> %s (slot %d)", cid, output_path, idx)
+        for idx, (cid, output_path, pdf_path) in enumerate(jobs):
+            target = pdf_path if export_format == "pdf" else output_path
+            log.info("  Queuing %s -> %s (slot %d)", cid, target, idx)
             future = executor.submit(
                 _worker,
-                cid, output_path, domain, page_load_extra_s,
-                capture_details, idx, cookies,
+                cid, output_path, pdf_path, domain, page_load_extra_s,
+                capture_details, include_banner, export_format, pdf_options,
+                idx, cookies,
             )
             futures[future] = cid
 
@@ -179,11 +211,48 @@ def run_bulk_capture(
                 else:
                     log.error("FAIL %s -- %s", cid, result.error)
                     if result.tb:
-                        log.debug("Traceback:\n%s", result.tb)
-                summary.results.append(result)
+                        log.warning("Traceback for %s:\n%s", cid, result.tb)
+                results_by_id[cid] = result
             except Exception as exc:
                 log.error("Worker crashed for %s: %s", cid, exc)
-                summary.results.append(CaptureResult(cid, error=str(exc)))
+                results_by_id[cid] = CaptureResult(cid, error=f"{type(exc).__name__}: {exc}")
+
+    failed_jobs = [
+        (cid, output_path, pdf_path)
+        for cid, output_path, pdf_path in jobs
+        if cid in results_by_id and not results_by_id[cid].success
+    ]
+    if failed_jobs and n_workers > 1:
+        log.warning(
+            "Retrying %d failed capture(s) sequentially with one headless worker...",
+            len(failed_jobs),
+        )
+        for cid, output_path, pdf_path in failed_jobs:
+            result = _worker(
+                cid,
+                output_path,
+                pdf_path,
+                domain,
+                page_load_extra_s,
+                capture_details,
+                include_banner,
+                export_format,
+                pdf_options,
+                0,
+                cookies,
+            )
+            if result.success:
+                log.info("RETRY OK  %s -> %s", cid, result.output_path)
+                results_by_id[cid] = result
+            else:
+                log.error("RETRY FAIL %s -- %s", cid, result.error)
+                if result.tb:
+                    log.warning("Retry traceback for %s:\n%s", cid, result.tb)
+                results_by_id[cid] = result
+
+    for cid, _output_path, _pdf_path in jobs:
+        if cid in results_by_id:
+            summary.results.append(results_by_id[cid])
 
     purge_tmp()
     return summary

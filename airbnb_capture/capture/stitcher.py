@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 from selenium import webdriver
 
 from ..config import STRIP_OVERLAP_PX, STRIP_PAUSE_S, log
@@ -38,9 +38,106 @@ def take_strip(
     """
     driver.save_screenshot(str(tmp_path))
     with Image.open(tmp_path) as raw:
-        crop = raw.crop((px_left, px_top, px_right, px_bottom)).copy()
+        left = max(0, min(raw.width, px_left))
+        top = max(0, min(raw.height, px_top))
+        right = max(left + 1, min(raw.width, px_right))
+        bottom = max(top + 1, min(raw.height, px_bottom))
+        crop = raw.crop((left, top, right, bottom)).copy()
     tmp_path.unlink(missing_ok=True)
     return crop
+
+
+def _estimate_background(gray: Image.Image) -> int:
+    w, h = gray.size
+    box = max(6, min(w, h) // 60)
+    corners = [
+        gray.crop((0, 0, box, box)),
+        gray.crop((w - box, 0, w, box)),
+        gray.crop((0, h - box, box, h)),
+        gray.crop((w - box, h - box, w, h)),
+    ]
+    return int(max(ImageStat.Stat(c).mean[0] for c in corners))
+
+
+def _row_ink_scores(img: Image.Image, max_width: int = 360) -> list[float]:
+    w, h = img.size
+    analysis_w = min(max_width, w)
+    if analysis_w != w:
+        analysis = img.resize((analysis_w, h), Image.Resampling.BILINEAR)
+    else:
+        analysis = img
+
+    gray = analysis.convert("L")
+    bg = _estimate_background(gray)
+    diff = ImageChops.difference(gray, Image.new("L", gray.size, bg))
+    diff_mask = diff.point(lambda p: 255 if p > 8 else 0, mode="1")
+    dark_mask = gray.point(lambda p: 255 if p < 238 else 0, mode="1")
+    mask = ImageChops.logical_or(diff_mask, dark_mask)
+
+    pix = mask.load()
+    scores: list[float] = []
+    for y in range(h):
+        ink = 0
+        for x in range(analysis_w):
+            if pix[x, y]:
+                ink += 1
+        scores.append(ink / analysis_w)
+    return scores
+
+
+def choose_safe_seam_css(
+    strip: Image.Image,
+    actual_css: float,
+    covered_css: float,
+    viewport_h: float,
+    device_pixel_ratio: float,
+) -> float:
+    """
+    Pick a strip join row inside the already-overlapped region.
+
+    Joining through text is usually harmless when the page is perfectly stable,
+    but support chats can repaint by a pixel or two between scrolls. Moving the
+    join to a visually blank row makes those tiny shifts much less noticeable.
+    """
+    overlap_top_css = max(actual_css, covered_css - 180.0)
+    overlap_bottom_css = min(covered_css, actual_css + viewport_h)
+    if overlap_bottom_css - overlap_top_css < 8.0:
+        return covered_css
+
+    top_px = max(0, round((overlap_top_css - actual_css) * device_pixel_ratio))
+    bottom_px = min(strip.height, round((overlap_bottom_css - actual_css) * device_pixel_ratio))
+    if bottom_px - top_px < 8:
+        return covered_css
+
+    scores = _row_ink_scores(strip.crop((0, top_px, strip.width, bottom_px)))
+    min_band = max(3, round(6 * device_pixel_ratio))
+    threshold = 0.003
+    best: tuple[int, int] | None = None
+    i = 0
+    while i < len(scores):
+        if scores[i] > threshold:
+            i += 1
+            continue
+        start = i
+        while i < len(scores) and scores[i] <= threshold:
+            i += 1
+        end = i
+        if end - start >= min_band:
+            if best is None:
+                best = (start, end)
+            else:
+                centre = (start + end) // 2
+                best_centre = (best[0] + best[1]) // 2
+                target = len(scores) - 1
+                if abs(target - centre) < abs(target - best_centre):
+                    best = (start, end)
+
+    if best is None:
+        return covered_css
+
+    seam_px = top_px + (best[0] + best[1]) // 2
+    seam_css = actual_css + seam_px / device_pixel_ratio
+    return min(covered_css, max(actual_css, seam_css))
 
 
 def stitch_element(
@@ -110,7 +207,8 @@ def stitch_element(
         wait_for_paint(driver)
         # Sticky response-time overlays can reappear while scrolling. Hide them
         # immediately before each strip so they do not get captured mid-thread.
-        hide_overlays(driver, el)
+        if hide_overlays(driver, el):
+            wait_for_paint(driver)
         actual = scroll_top(driver, el)
 
         # Skip if the browser didn't advance (already at bottom)
@@ -126,8 +224,9 @@ def stitch_element(
         if first_strip_h is None:
             first_strip_h = strip.height
 
-        # Compute the CSS interval this strip covers, then trim guard pixels
-        # from shared edges to eliminate repaint artefacts at seam boundaries.
+        # Compute the CSS interval this strip covers. For shared edges, prefer a
+        # visually blank seam inside the overlap so tiny support-chat repaints do
+        # not cut through text.
         seg_start = max(actual, covered_css)
         seg_end   = min(actual + viewport_h, total_scroll_h)
 
@@ -137,7 +236,17 @@ def stitch_element(
             continue
 
         if not is_first:
-            seg_start += 1.0
+            try:
+                seg_start = choose_safe_seam_css(
+                    strip,
+                    actual,
+                    covered_css,
+                    viewport_h,
+                    device_pixel_ratio,
+                )
+            except Exception as exc:
+                log.debug("[%s] safe seam detection failed: %s", label, exc)
+                seg_start += 1.0
         if not is_last:
             seg_end   -= 1.0
 

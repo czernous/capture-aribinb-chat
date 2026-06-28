@@ -14,7 +14,8 @@ from ..dom.js import dpr, elem_rect
 from ..dom.overlays import hide_overlays
 from ..dom.selectors import detect_selectors
 from ..models import Selectors
-from ..output.writer import save_jpeg
+from ..output.pdf import PdfOptions
+from ..output.writer import save_capture
 from .history import load_full_history
 from .panels import compose
 from .stitcher import stitch_element
@@ -23,10 +24,14 @@ def capture_conversation(
     driver: webdriver.Chrome,
     conversation_id: str,
     output_path: Path,
+    pdf_path: Path | None,
     selectors: Selectors,
     domain: str,
     page_load_extra_s: float,
     capture_details: bool,
+    include_banner: bool = False,
+    export_format: str = "jpg",
+    pdf_options: PdfOptions | None = None,
 ) -> None:
     """
     Navigate to one conversation and write a stitched JPEG to output_path.
@@ -38,11 +43,22 @@ def capture_conversation(
     driver.get(url)
 
     wait = WebDriverWait(driver, PAGE_LOAD_WAIT_S)
+    time.sleep(1.0)
+    n_hidden = hide_overlays(driver)
+    if n_hidden:
+        log.info("Hid %d pre-chat overlay(s)", n_hidden)
+
     try:
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selectors.chat)))
     except TimeoutException:
+        n_hidden = hide_overlays(driver)
+        if n_hidden:
+            log.info("Hid %d overlay(s) before selector auto-detect", n_hidden)
         log.warning("Chat selector timed out — running auto-detect")
         selectors = detect_selectors(driver)
+        n_hidden = hide_overlays(driver)
+        if n_hidden:
+            log.info("Hid %d overlay(s) after selector auto-detect", n_hidden)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selectors.chat)))
 
     time.sleep(page_load_extra_s)
@@ -99,4 +115,13 @@ def capture_conversation(
             log.warning("Details produced no strips — omitting")
 
     final = compose(chat_canvas, details_canvas)
-    save_jpeg(final, output_path, conversation_id, url)
+    save_capture(
+        final,
+        output_path,
+        conversation_id,
+        url,
+        export_format=export_format,
+        include_banner=include_banner,
+        pdf_path=pdf_path,
+        pdf_options=pdf_options,
+    )

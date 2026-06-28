@@ -19,6 +19,7 @@ airbnb_cookies.json
 # Local inputs / outputs
 conversations.txt
 screenshots/
+pdfs/
 airbnb_error_*.jpg
 airbnb_diagnose.jpg
 airbnb_chat_*

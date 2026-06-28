@@ -92,6 +92,25 @@ uv run airbnb-capture --ids-file conversations.txt
 
 `conversations.txt` should contain one conversation ID per line. Blank lines and lines beginning with `#` are ignored.
 
+Export PDFs directly:
+
+```bash
+uv run airbnb-capture --ids-file conversations.txt --export-format pdf
+```
+
+Create PDFs from already captured screenshots without opening Chrome or checking
+login:
+
+```bash
+uv run airbnb-capture --ids-file conversations.txt --from-screenshots --pdf-debug
+```
+
+Export both clean JPGs and paginated PDFs:
+
+```bash
+uv run airbnb-capture --ids-file conversations.txt --export-format both --pdf-debug
+```
+
 ## CLI Options
 
 | Option | Description |
@@ -100,11 +119,19 @@ uv run airbnb-capture --ids-file conversations.txt
 | `--ids-file FILE` | Read conversation IDs from a text file. |
 | `--out PATH` | Output path for a single capture. |
 | `--out-dir DIR` | Output directory for bulk capture. Default: `screenshots`. |
+| `--pdf-dir DIR` | Output directory for PDF exports. Default: `pdfs`. |
 | `--domain URL` | Airbnb domain. Default: `https://www.airbnb.co.uk`. |
+| `--export-format jpg\|pdf\|both` | Export clean JPG screenshots, paginated PDFs, or both. Default: `jpg`. |
+| `--from-screenshots` | Create PDFs from existing JPG screenshots without launching Chrome. |
 | `--diagnose` | Print DOM information, save a diagnostic screenshot, and wait before closing Chrome. |
 | `--no-details` | Capture only the chat panel. |
+| `--metadata-banner` | Prepend the dark evidence metadata banner to exported images. Default is clean image output. |
 | `--delay SECONDS` | Extra wait after page load. Default: `3.0`. |
 | `--workers N` | Maximum parallel Chrome workers. Default: `4`. |
+| `--pdf-page-size a4\|letter` | PDF page size. Default: `a4`. |
+| `--pdf-dpi N` | PDF raster DPI. Default: `150`. |
+| `--pdf-margin N` | PDF page margin in output pixels. Default: `40`. |
+| `--pdf-debug` | Write `.cuts.json` sidecars with chosen page cuts. |
 | `--verbose` | Enable debug logging. |
 
 ## Project Structure
@@ -141,6 +168,7 @@ airbnb_capture/
 
   output/
     banner.py
+    pdf.py
     writer.py
 
   orchestration/

@@ -57,4 +57,4 @@ BANNER_FONT_SIZE: int = 18
 BANNER_BG: tuple = (30, 30, 30)
 BANNER_FG: tuple = (220, 220, 220)
 
-JPEG_QUALITY: int = 60
+JPEG_QUALITY: int = 88

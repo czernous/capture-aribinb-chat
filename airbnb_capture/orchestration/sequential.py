@@ -9,6 +9,7 @@ from selenium import webdriver
 from ..capture.conversation import capture_conversation
 from ..config import log
 from ..models import BulkSummary, CaptureResult, Selectors
+from ..output.pdf import PdfOptions
 from ..paths import resolve_path
 
 def run_captures(
@@ -19,6 +20,10 @@ def run_captures(
     domain: str,
     page_load_extra_s: float,
     capture_details: bool,
+    include_banner: bool = False,
+    export_format: str = "jpg",
+    pdf_dir: str = "pdfs",
+    pdf_options: PdfOptions | None = None,
 ) -> BulkSummary:
     """
     Capture all conversations one by one using the same Chrome session.
@@ -29,18 +34,24 @@ def run_captures(
     summary   = BulkSummary()
 
     for conv_id in conversation_ids:
-        output_path = resolve_path(conv_id, out_flag, out_dir, is_multi)
+        jpg_path = resolve_path(conv_id, out_flag, out_dir, is_multi, ".jpg")
+        pdf_path = resolve_path(conv_id, out_flag, pdf_dir, is_multi, ".pdf")
+        primary_path = pdf_path if export_format == "pdf" else jpg_path
         try:
             capture_conversation(
                 driver          = driver,
                 conversation_id = conv_id,
-                output_path     = output_path,
+                output_path     = jpg_path,
+                pdf_path        = pdf_path,
                 selectors       = selectors,
                 domain          = domain,
                 page_load_extra_s = page_load_extra_s,
                 capture_details = capture_details,
+                include_banner  = include_banner,
+                export_format   = export_format,
+                pdf_options     = pdf_options,
             )
-            summary.results.append(CaptureResult(conv_id, output_path=output_path))
+            summary.results.append(CaptureResult(conv_id, output_path=primary_path))
         except Exception as exc:
             log.error("Failed: %s — %s", conv_id, exc)
             log.debug(traceback.format_exc())
